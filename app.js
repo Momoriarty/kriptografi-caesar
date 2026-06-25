@@ -10,6 +10,8 @@ import {
   setDoc,
   getDoc
 } from "https://www.gstatic.com/firebasejs/12.1.0/firebase-firestore.js";
+// Import fungsi caesar dari file kriptografi terpisah
+import { caesar } from "./kriptografi.js";
 
 /* ================= FIREBASE CONFIG ================= */
 const firebaseConfig = {
@@ -29,22 +31,6 @@ let username = "";
 let roomId = "";
 let roomKey = 3;
 
-/* ================= CAESAR CIPHER ================= */
-function caesar(text, shift) {
-  let result = "";
-  shift = ((shift % 26) + 26) % 26;
-  for (let c of text) {
-    if (c >= "A" && c <= "Z") {
-      result += String.fromCharCode((c.charCodeAt(0) - 65 + shift) % 26 + 65);
-    } else if (c >= "a" && c <= "z") {
-      result += String.fromCharCode((c.charCodeAt(0) - 97 + shift) % 26 + 97);
-    } else {
-      result += c;
-    }
-  }
-  return result;
-}
-
 /* ================= LOGIC FUNCTIONS ================= */
 
 async function createRoom() {
@@ -55,47 +41,72 @@ async function createRoom() {
   if (!keyInput || isNaN(keyInput)) return alert("Kunci harus berupa angka!");
 
   roomKey = parseInt(keyInput);
-  roomId = Math.random().toString(36).substring(2, 8).toUpperCase();
+
+  // Buat kode dasar berbasis teks statis + angka agar pergeseran enkripsi terlihat jelas di database
+  const rawRoomId = "ROOM" + Math.floor(10 + Math.random() * 90); 
+
+  // ENKRIPSI kode tersebut untuk dijadikan ID Dokumen di Firebase (Misal: ROOM55 -> SPPN66 jika shift = 1)
+  roomId = caesar(rawRoomId, roomKey);
+
+  const encryptedKeyDescription = caesar(roomKey.toString(), roomKey);
+  const encryptedTimestamp = caesar(Date.now().toString(), roomKey);
 
   try {
-    // Menyimpan data room baru ke cloud server Firestore
     await setDoc(doc(db, "rooms", roomId), {
-      key: roomKey,
-      createdAt: Date.now()
+      secureKey: encryptedKeyDescription,
+      secureTime: encryptedTimestamp
     });
+
+    // Simpan kode asli ke memori browser untuk ditampilkan di UI chat
+    window.originalRoomCode = rawRoomId;
+
     openChat();
   } catch (error) {
-    console.error("Gagal create room:", error);
-    alert("Gagal terhubung ke Firebase. Pastikan koneksi internet stabil.");
+    console.error("Gagal membuat room:", error);
   }
 }
 
 async function joinRoom() {
   username = document.getElementById("username").value.trim();
-  roomId = document.getElementById("roomCode").value.trim().toUpperCase();
+  const inputRoomId = document.getElementById("roomCode").value.trim().toUpperCase(); 
+  const keyInput = document.getElementById("roomKey").value;
 
-  if (!username || !roomId) return alert("Lengkapi data room!");
+  if (!username || !inputRoomId || !keyInput) return alert("Lengkapi data login!");
+
+  const inputKey = parseInt(keyInput);
+
+  // Ubah kode input biasa menjadi versi enkripsi untuk dicocokkan dengan ID Dokumen di Firebase
+  const encryptedSearchId = caesar(inputRoomId, inputKey);
 
   try {
-    // Mengunduh validasi kode room langsung dari cloud server
-    const roomSnap = await getDoc(doc(db, "rooms", roomId));
+    const roomSnap = await getDoc(doc(db, "rooms", encryptedSearchId));
 
     if (!roomSnap.exists()) {
-      return alert("Room tidak ditemukan! Periksa kembali kode room.");
+      return alert("Room tidak ditemukan! Periksa kembali kode room atau kuncinya.");
     }
 
-    roomKey = parseInt(roomSnap.data().key);
-    openChat();
+    const roomData = roomSnap.data();
+    const decryptedKeyStr = caesar(roomData.secureKey, -inputKey);
+    const validKey = parseInt(decryptedKeyStr);
+
+    if (validKey === inputKey) {
+      roomId = encryptedSearchId; 
+      roomKey = inputKey;
+      window.originalRoomCode = inputRoomId; 
+      openChat();
+    } else {
+      alert("Kunci salah!");
+    }
   } catch (error) {
     console.error("Gagal join room:", error);
-    alert("Gagal masuk ke room. Periksa jaringan internet Anda.");
   }
 }
 
 function openChat() {
   document.getElementById("homePage").style.display = "none";
   document.getElementById("chatPage").style.display = "flex";
-  document.getElementById("roomTitle").innerText = `Room: ${roomId}`;
+  // Memakai kode asli di layar aplikasi agar mudah dibaca user
+  document.getElementById("roomTitle").innerText = `Room: ${window.originalRoomCode}`;
 
   listenMessages();
 }
@@ -107,7 +118,7 @@ async function sendMessage() {
   if (!msg) return;
 
   const encrypted = caesar(msg, roomKey);
-  msgInput.value = ""; // Bersihkan kolom input segera
+  msgInput.value = "";
 
   try {
     await addDoc(collection(db, "rooms", roomId, "messages"), {
@@ -129,7 +140,7 @@ function listenMessages() {
 
     snapshot.forEach((docSnap) => {
       const data = docSnap.data();
-      const decrypted = caesar(data.text, -roomKey); // Dekripsi otomatis di sisi klien
+      const decrypted = caesar(data.text, -roomKey);
 
       const div = document.createElement("div");
       div.classList.add("msg");
@@ -139,8 +150,8 @@ function listenMessages() {
       }
 
       const nameNode = document.createElement("b");
-      nameNode.textContent = data.sender; 
-      
+      nameNode.textContent = data.sender;
+
       const textNode = document.createTextNode(decrypted);
 
       div.appendChild(nameNode);
@@ -155,7 +166,8 @@ function listenMessages() {
 }
 
 function copyRoomCode() {
-  navigator.clipboard.writeText(roomId);
+  // Menyalin kode asli ke clipboard, bukan kode terenkripsi
+  navigator.clipboard.writeText(window.originalRoomCode);
   alert("Room code berhasil disalin!");
 }
 
@@ -166,7 +178,7 @@ document.addEventListener("DOMContentLoaded", () => {
   document.getElementById("btnSendMessage").addEventListener("click", sendMessage);
   document.getElementById("btnCopyRoom").addEventListener("click", copyRoomCode);
 
-  document.getElementById("message").addEventListener("keypress", function(e) {
+  document.getElementById("message").addEventListener("keypress", function (e) {
     if (e.key === "Enter") {
       sendMessage();
     }
